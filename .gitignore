@@ -1,0 +1,19 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Compiled binary (matches module name)
+/rag-course
+rag
+
+# Go build/test artifacts
+*.exe
+*.test
+*.out
+coverage.out
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp

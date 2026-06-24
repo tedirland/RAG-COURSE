@@ -28,7 +28,7 @@ func Load() Config {
 	}
 
 	if cfg.Model == "" {
-		cfg.Model = "gpt-4o-mini"
+		cfg.Model = "gpt-5-mini"
 	}
 
 	return cfg
