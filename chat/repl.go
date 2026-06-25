@@ -60,7 +60,8 @@ func RunREPL(ctx context.Context, client *llm.Client, opts Options) error {
 		fmt.Println()
 
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "error: ", err)
+			fmt.Fprint(os.Stderr, "error: ", err)
+			history = history[:len(history)-1]
 			continue
 		}
 
@@ -75,12 +76,17 @@ type spinner struct {
 	once sync.Once
 }
 
+var spinnerFrames = []string{"|", "/", "-", "\\"}
+
+// frameAt returns the spinner glyph for tick i, cycling through the frames.
+func frameAt(i int) string {
+	return spinnerFrames[i%len(spinnerFrames)]
+}
+
 func startSpinner(label string) *spinner {
 	s := &spinner{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
-		// frames for spinner
-		frames := []string{"|", "/", "-", "\\"}
 		t := time.NewTicker(80 * time.Millisecond)
 		defer t.Stop()
 		i := 0
@@ -90,7 +96,7 @@ func startSpinner(label string) *spinner {
 				fmt.Print("\r\033[K")
 				return
 			case <-t.C:
-				fmt.Printf("\r%s %s", frames[i%len(frames)], label)
+				fmt.Printf("\r%s %s", frameAt(i), label)
 				i++
 			}
 		}
