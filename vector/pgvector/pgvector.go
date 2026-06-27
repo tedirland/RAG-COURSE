@@ -2,11 +2,14 @@ package pgvector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"rag-course/vector"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgvector/pgvector-go"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
 )
 
@@ -71,11 +74,11 @@ func (s *Store) migrate(ctx context.Context, dim int) error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS documents(
 		id 	TEXT PRIMARY KEY,
 		content TEXT NOT NULL,
-		metadata. JSONB NOT NULL DEFAULT '{}'::jsonb,
-		embedding. vector(%d)NOT NULL,
-		created_at  TIMESTAMPZ NOT NULL DEFAULT now())
+		metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+		embedding vector(%d) NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT now())
 		`, dim),
-		`CREATE INDEX IF NOT EXISTS documents_embedding_idx,
+		`CREATE INDEX IF NOT EXISTS documents_embedding_idx
 		  ON documents USING hnsw(embedding vector_cosine_ops)`,
 	}
 	for _, q := range stmts {
@@ -93,4 +96,118 @@ func firstLine(s string) string {
 		}
 	}
 	return s
+}
+
+func (s *Store) Upsert(ctx context.Context, docs []vector.Document) error {
+	if len(docs) == 0 {
+		fmt.Println("No documents found")
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	const stmt = `
+		INSERT INTO documents (id, content, metadata,embedding)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE SET
+			content = EXCLUDED.content,
+			metadata = EXCLUDED.metadata,
+			embedding = EXCLUDED.embedding
+	`
+
+	for _, d := range docs {
+		meta, err := marshallMetadata(d.Metadata)
+		if err != nil {
+			return fmt.Errorf("metadata for %s: %w", d.ID, err)
+		}
+		if _, err := tx.Exec(ctx, stmt, d.ID, d.Content, meta, pgvector.NewVector(d.Embedding)); err != nil {
+			return fmt.Errorf("upsert: %s: %w", d.ID, err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+func marshallMetadata(m map[string]string) ([]byte, error) {
+	if len(m) == 0 {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(m)
+}
+
+func unmarshallMetadata(raw []byte, dest *map[string]string) error {
+	if len(raw) == 0 {
+		*dest = nil
+		return nil
+	}
+	return json.Unmarshal(raw, dest)
+}
+
+func (s *Store) Query(ctx context.Context, embedding []float32, topk int) ([]vector.Result, error) {
+	if topk <= 0 {
+		return nil, nil
+	}
+
+	const stmt = `
+		SELECT id, content, metadata, embedding <=> $1 as distance
+		FROM documents
+		ORDER BY embedding <=> $1
+		limit $2
+	`
+	rows, err := s.pool.Query(ctx, stmt, pgvector.NewVector(embedding), topk)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []vector.Result
+	for rows.Next() {
+		var (
+			r        vector.Result
+			metaRaw  []byte
+			distance float64
+		)
+
+		if err := rows.Scan(&r.ID, &r.Content, &metaRaw, &distance); err != nil {
+			return nil, err
+		}
+		if err := unmarshallMetadata(metaRaw, &r.Metadata); err != nil {
+			return nil, fmt.Errorf("metadata for %s: %w", r.ID, err)
+		}
+		r.Score = float32(1 - distance)
+		results = append(results, r)
+	}
+
+	return results, rows.Err()
+
+}
+
+func (s *Store) Delete(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	_, err := s.pool.Exec(ctx, `DELETE FROM documents where id = ANY($1)`, ids)
+	return err
+
+}
+func (s *Store) DeleteBySource(ctx context.Context, source string) error {
+
+	if source == "" {
+		return nil
+	}
+
+	_, err := s.pool.Exec(ctx, `DELETE FROM DOCUMENTS WHERE metadata->>'source' = $1`, source)
+	return err
+
+}
+func (s *Store) Close() error {
+	s.pool.Close()
+	return nil
+
 }
